@@ -62,12 +62,8 @@ def analyze_timeseries(
     sen_per_year = float(sen_slope_yr)
     sen_per_decade = float(sen_per_year * 10.0)
 
-    if mk_p < 0.01:
-        sig_level = f"highly significant (p < 0.01, {mk_trend})"
-    elif mk_p < alpha:
-        sig_level = f"significant (p < {alpha}, {mk_trend})"
-    else:
-        sig_level = f"not statistically significant (p = {mk_p:.3f})"
+    # Exact level string expected by frontend UI cards
+    sig_level = "significant" if mk_p < alpha else "not_significant"
 
     return {
         "meta": {
@@ -106,5 +102,6 @@ def analyze_timeseries(
         "significance": {
             "alpha": alpha,
             "level": sig_level,
+            "significant": bool(mk_p < alpha),
         },
     }

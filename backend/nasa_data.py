@@ -1,8 +1,9 @@
+import csv
+import io
 import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, List
-import pandas as pd
 
 logger = logging.getLogger("terratrend.nasa_data")
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -23,7 +24,7 @@ VARIABLES_CONFIG: Dict[str, Dict[str, str]] = {
     },
     "rain": {
         "file": "rain.csv",
-        "name": "Precipitation",
+        "name": "Precipitation Rate",
         "unit": "mm/hr",
         "raw_unit": "mm/hr",
     },
@@ -64,17 +65,27 @@ def fetch_point_timeseries(
     csv_path = DATA_DIR / cfg["file"]
 
     if csv_path.exists():
-        try:
-            df = pd.read_csv(csv_path, skiprows=8)
-            df = df.iloc[:, :2].copy()
-            df.columns = ["Date", "Value"]
-            records = df.to_dict(orient="records")
+        with open(csv_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+
+        header_idx = 0
+        for i, line in enumerate(lines):
+            s = line.strip().lower()
+            if s.startswith("time,") or s.startswith("date,") or s.startswith("datetime,"):
+                header_idx = i
+                break
+
+        reader = csv.reader(io.StringIO("".join(lines[header_idx:])))
+        rows = list(reader)
+        if len(rows) > 1:
+            records = []
+            for r in rows[1:]:
+                if len(r) >= 2 and r[0].strip():
+                    records.append({"Date": r[0].strip(), "Value": r[1].strip()})
             if records:
                 records[0]["_var_key"] = var_key
                 records[0]["_source_file"] = cfg["file"]
                 return records
-        except Exception as exc:
-            raise NasaDataError(f"Error reading {cfg['file']}: {exc}") from exc
 
     for json_candidate in [DATA_DIR / "dashboard_data.json", DATA_DIR.parent / "dashboard_data.json"]:
         if json_candidate.exists():
