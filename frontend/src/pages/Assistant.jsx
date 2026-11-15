@@ -20,7 +20,7 @@ export default function Assistant() {
   const [busy, setBusy] = useState(false)
   const endRef = useRef(null)
 
-  useEffect(() => endRef.current?.scrollIntoView({ behavior: 'smooth' }), [messages])
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
 
   const send = async (text) => {
     const message = text.trim()
