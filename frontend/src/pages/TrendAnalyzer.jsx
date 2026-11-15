@@ -1,194 +1,375 @@
-import { useState } from 'react'
-import { Link } from 'react-router-dom'
-import { Activity, Play, TrendingDown, TrendingUp } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { Link, useSearchParams } from 'react-router-dom'
 import PageHeader from '../components/PageHeader.jsx'
 import Panel from '../components/Panel.jsx'
-import StatCard from '../components/StatCard.jsx'
-import Notice, { ErrorNotice } from '../components/Notice.jsx'
-import PlotChart, { COLORS } from '../charts/PlotChart.jsx'
+import Notice from '../components/Notice.jsx'
+import PlotChart from '../charts/PlotChart.jsx'
 import EarthMap from '../maps/EarthMap.jsx'
-import { api } from '../services/api.js'
 import { useAnalysis } from '../context/AnalysisContext.jsx'
-import { CASE_STUDY } from '../constants.js'
 import { interpret, num, pval, signed } from '../lib/format.js'
 
+const GIOVANNI_VARIABLES = [
+  {
+    id: 'temperature',
+    product: 'temperature',
+    layer: 'LST_Day_1km',
+    label: 'Surface Temperature (temperature.csv — Terra MODIS / AIRS)',
+    subtitle: 'NASA Giovanni · Terra MODIS / AIRS · Monthly (2015–2025) · °C',
+    caveatTitle: 'Land surface temperature is not air temperature',
+    caveatText:
+      'LST is the radiometric skin temperature of the ground and vegetation canopy seen by satellite thermal sensors. It can be warmer than 2-meter weather station air temperature during daytime.',
+  },
+  {
+    id: 'moisture',
+    product: 'moisture',
+    layer: 'Soil_Moisture',
+    label: 'Root Zone Soil Moisture (moisture.csv — NASA GLDAS Noah)',
+    subtitle: 'NASA Giovanni · GLDAS Noah 0.25° · Monthly (2015–2025) · kg m-2',
+    caveatTitle: 'Root zone soil moisture reflects upper-profile water storage',
+    caveatText:
+      'GLDAS Root Zone Soil Moisture estimates water content (kg m-2) available to plant roots and is strongly coupled to monsoon recharge, evapotranspiration, and agricultural drought.',
+  },
+  {
+    id: 'rain',
+    product: 'rain',
+    layer: 'Precipitation',
+    label: 'Precipitation Rate (rain.csv — NASA GPM IMERG)',
+    subtitle: 'NASA Giovanni · GPM IMERG 0.1° · Monthly (2015–2025) · mm/hr',
+    caveatTitle: 'Monsoon variability and multi-decadal rainfall trends',
+    caveatText:
+      'GPM IMERG merges satellite microwave and infrared estimates with surface rain gauges. Strong seasonal monsoon cycles can mask long-term trends unless deseasonalized.',
+  },
+  {
+    id: 'evapo',
+    product: 'evapo',
+    layer: 'Evapotranspiration',
+    label: 'Evapotranspiration (evapo.csv — NASA GLDAS / MODIS)',
+    subtitle: 'NASA Giovanni · GLDAS Model 0.25° · Monthly (2015–2025) · kg m-2 s-1',
+    caveatTitle: 'Evapotranspiration links the water and surface energy balances',
+    caveatText:
+      'Evapotranspiration (kg m-2 s-1) measures total water vapor flux from soil evaporation and plant transpiration. Rising evapotranspiration often tracks vegetation greening and irrigation.',
+  },
+]
+
 export default function TrendAnalyzer() {
-  const { location, setLocation, result, setResult } = useAnalysis()
-  const [layer, setLayer] = useState(CASE_STUDY.layers[0].id)
-  const [start, setStart] = useState(CASE_STUDY.start)
-  const [end, setEnd] = useState(CASE_STUDY.end)
+  const [searchParams] = useSearchParams()
+  const initialVar = searchParams.get('var') || 'temperature'
+
+  const ctx = useAnalysis() || {}
+  const savedLoc = ctx.location || ctx.selectedLocation || {}
+
+  const [selectedVarId, setSelectedVarId] = useState(
+    GIOVANNI_VARIABLES.some((v) => v.id === initialVar) ? initialVar : 'temperature'
+  )
+  const [lat, setLat] = useState(Number(savedLoc.lat ?? 21.2514))
+  const [lon, setLon] = useState(Number(savedLoc.lon ?? 81.6296))
+  const [start, setStart] = useState('2015-01-01')
+  const [end, setEnd] = useState('2025-09-30')
   const [aggregation, setAggregation] = useState('monthly')
   const [deseasonalize, setDeseasonalize] = useState(true)
+
+  const [result, setLocalResult] = useState(ctx.result || null)
   const [loading, setLoading] = useState(false)
-  const [error, setError] = useState(null)
+  const [error, setError] = useState('')
 
-  const invalid = !(location.lat >= -90 && location.lat <= 90 && location.lon >= -180 && location.lon <= 180) || start >= end
+  const activeVar =
+    GIOVANNI_VARIABLES.find((v) => v.id === selectedVarId) || GIOVANNI_VARIABLES[0]
 
-  const run = async (e) => {
-    e.preventDefault()
+  const runAnalysis = async (varOverride) => {
+    const chosen =
+      GIOVANNI_VARIABLES.find((v) => v.id === (varOverride || selectedVarId)) ||
+      activeVar
     setLoading(true)
-    setError(null)
+    setError('')
     try {
-      const res = await api.analyzeTrend({
-        product: CASE_STUDY.product,
-        layer,
-        lat: Number(location.lat),
-        lon: Number(location.lon),
-        start,
-        end,
-        aggregation,
-        deseasonalize,
+      const resp = await fetch('/api/trends/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          product: chosen.product,
+          layer: chosen.layer,
+          lat: Number(lat),
+          lon: Number(lon),
+          start,
+          end,
+          aggregation,
+          deseasonalize,
+        }),
       })
-      setResult(res)
+      if (!resp.ok) {
+        const errData = await resp.json().catch(() => ({}))
+        throw new Error(errData.detail || `HTTP ${resp.status}`)
+      }
+      const data = await resp.json()
+      setLocalResult(data)
+      if (ctx.setResult) ctx.setResult(data)
+      if (ctx.setAnalysis) ctx.setAnalysis(data)
     } catch (err) {
-      setError(err)
+      setError(err.message || 'Failed to run analysis')
     } finally {
       setLoading(false)
     }
   }
 
-  const summary = interpret(result)
-  const series = result?.series || []
-  const traces = []
-  if (series.length) {
-    traces.push({
-      x: series.map((p) => p.date),
-      y: series.map((p) => p.value),
-      type: 'scatter',
-      mode: 'lines',
-      name: result.meta?.layer || layer,
-      line: { color: COLORS.accent, width: 2 },
-      connectgaps: false,
-    })
-  }
-  if (result?.trend_line?.length) {
-    traces.push({
-      x: result.trend_line.map((p) => p.date),
-      y: result.trend_line.map((p) => p.value),
-      type: 'scatter',
-      mode: 'lines',
-      name: 'Linear trend',
-      line: { color: COLORS.amber, width: 2, dash: 'dash' },
-    })
-  }
+  useEffect(() => {
+    runAnalysis(selectedVarId)
+  }, [selectedVarId])
 
-  const decade = result?.trend?.slope_per_decade
-  const DirIcon = decade < 0 ? TrendingDown : TrendingUp
+  const mk = result?.tests?.mann_kendall || {}
+  const sen = result?.tests?.sen_slope || {}
+  const trend = result?.trend || {}
+  const units = result?.meta?.units || ''
+  const isSig =
+    mk.p_value !== undefined
+      ? Number(mk.p_value) < Number(result?.significance?.alpha ?? 0.05)
+      : false
 
   return (
     <div className="space-y-6">
       <PageHeader
         title="Trend Analyzer"
-        subtitle="Pick a place and a variable. The backend retrieves NASA data, builds a time series and tests whether it is trending."
+        subtitle="Pick a place and a NASA Giovanni variable. The backend cleans the 2015–2025 time series and tests whether the trend is statistically significant."
       />
 
-      <div className="grid gap-6 xl:grid-cols-3">
-        <Panel title="Analysis setup" className="xl:col-span-1">
-          <form onSubmit={run} className="space-y-4">
+      <div className="grid gap-6 lg:grid-cols-2">
+        <Panel>
+          <h3 className="text-base font-semibold text-white">Analysis setup</h3>
+
+          <div className="mt-4 space-y-4">
             <div>
-              <label className="label" htmlFor="layer">Variable</label>
-              <select id="layer" className="field" value={layer} onChange={(e) => setLayer(e.target.value)}>
-                {CASE_STUDY.layers.map((l) => (
-                  <option key={l.id} value={l.id}>{l.label} ({l.id})</option>
+              <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400">
+                Variable (4 NASA Giovanni Datasets)
+              </label>
+              <select
+                className="field mt-1 w-full"
+                value={selectedVarId}
+                onChange={(e) => setSelectedVarId(e.target.value)}
+              >
+                {GIOVANNI_VARIABLES.map((v) => (
+                  <option key={v.id} value={v.id}>
+                    {v.label}
+                  </option>
                 ))}
               </select>
-              <p className="mt-1 text-xs text-ink-faint">{CASE_STUDY.satellite} {CASE_STUDY.product}, {CASE_STUDY.spatial}</p>
+              <p className="mt-1 text-xs text-slate-400">{activeVar.subtitle}</p>
             </div>
 
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="label" htmlFor="lat">Latitude</label>
-                <input id="lat" type="number" step="0.0001" className="field" value={location.lat}
-                  onChange={(e) => setLocation({ ...location, name: 'Custom point', lat: e.target.value })} />
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400">
+                  Latitude
+                </label>
+                <input
+                  type="number"
+                  step="0.0001"
+                  className="field mt-1 w-full"
+                  value={lat}
+                  onChange={(e) => setLat(e.target.value)}
+                />
               </div>
               <div>
-                <label className="label" htmlFor="lon">Longitude</label>
-                <input id="lon" type="number" step="0.0001" className="field" value={location.lon}
-                  onChange={(e) => setLocation({ ...location, name: 'Custom point', lon: e.target.value })} />
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400">
+                  Longitude
+                </label>
+                <input
+                  type="number"
+                  step="0.0001"
+                  className="field mt-1 w-full"
+                  value={lon}
+                  onChange={(e) => setLon(e.target.value)}
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400">
+                  Start
+                </label>
+                <input
+                  type="date"
+                  className="field mt-1 w-full"
+                  value={start}
+                  onChange={(e) => setStart(e.target.value)}
+                />
               </div>
               <div>
-                <label className="label" htmlFor="start">Start</label>
-                <input id="start" type="date" className="field" value={start} onChange={(e) => setStart(e.target.value)} />
-              </div>
-              <div>
-                <label className="label" htmlFor="end">End</label>
-                <input id="end" type="date" className="field" value={end} onChange={(e) => setEnd(e.target.value)} />
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400">
+                  End
+                </label>
+                <input
+                  type="date"
+                  className="field mt-1 w-full"
+                  value={end}
+                  onChange={(e) => setEnd(e.target.value)}
+                />
               </div>
             </div>
 
             <div>
-              <label className="label" htmlFor="agg">Aggregation</label>
-              <select id="agg" className="field" value={aggregation} onChange={(e) => setAggregation(e.target.value)}>
-                <option value="8day">8-day composite (native)</option>
+              <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400">
+                Aggregation
+              </label>
+              <select
+                className="field mt-1 w-full"
+                value={aggregation}
+                onChange={(e) => setAggregation(e.target.value)}
+              >
                 <option value="monthly">Monthly mean</option>
                 <option value="annual">Annual mean</option>
               </select>
             </div>
 
-            <label className="flex items-center gap-2 text-sm text-ink-muted">
-              <input type="checkbox" checked={deseasonalize} onChange={(e) => setDeseasonalize(e.target.checked)} />
+            <label className="flex items-center gap-2 text-sm text-slate-300">
+              <input
+                type="checkbox"
+                checked={deseasonalize}
+                onChange={(e) => setDeseasonalize(e.target.checked)}
+                className="rounded border-slate-700 accent-sky-400"
+              />
               Remove the seasonal cycle before testing
             </label>
 
-            <button className="btn-primary w-full" disabled={loading || invalid} type="submit">
-              <Play size={16} aria-hidden /> {loading ? 'Retrieving and analyzing…' : 'Run analysis'}
+            <button
+              type="button"
+              onClick={() => runAnalysis()}
+              disabled={loading}
+              className="btn-primary w-full justify-center py-2.5"
+            >
+              {loading ? 'Running NASA trend analysis…' : '▷ Run analysis'}
             </button>
-            {invalid && <p className="text-xs text-amber-300">Check the coordinates and make sure the start date is before the end date.</p>}
-          </form>
+
+            {error && (
+              <p className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-xs text-red-200">
+                {error}
+              </p>
+            )}
+          </div>
         </Panel>
 
-        <Panel title="Location" subtitle="Click the map to move the point" className="xl:col-span-2">
+        <Panel>
+          <h3 className="text-base font-semibold text-white">Location</h3>
+          <p className="mb-3 text-xs text-slate-400">Click the map to move the study point</p>
           <EarthMap
-            lat={Number(location.lat) || 0}
-            lon={Number(location.lon) || 0}
-            zoom={6}
-            height={330}
-            onSelect={({ lat, lon }) => setLocation({ name: `Custom point (${lat}, ${lon})`, lat, lon })}
+            lat={Number(lat)}
+            lon={Number(lon)}
+            activeOverlay={selectedVarId}
+            onPick={(c) => {
+              setLat(c.lat)
+              setLon(c.lon)
+            }}
+            onSelect={(c) => {
+              setLat(c.lat)
+              setLon(c.lon)
+            }}
+            height="h-[360px]"
           />
         </Panel>
       </div>
 
-      <ErrorNotice error={error} />
-
-      {loading && <Notice>Data extraction from NASA services can take a while. Please keep this tab open.</Notice>}
-
       {result && (
         <>
-          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-            <StatCard icon={DirIcon} label="Change per decade" value={`${signed(decade, 2)} ${result.meta?.units || ''}`} sub={`${signed(result.trend?.slope_per_year, 3)} per year (OLS)`} tone="accent" />
-            <StatCard icon={Activity} label="Sen's slope / year" value={signed(result.tests?.sen_slope?.per_year, 3)} sub={`95% CI ${num(result.tests?.sen_slope?.ci_low, 3)} to ${num(result.tests?.sen_slope?.ci_high, 3)}`} tone="teal" />
-            <StatCard icon={Activity} label="Mann-Kendall p-value" value={pval(result.tests?.mann_kendall?.p_value)} sub={`tau = ${num(result.tests?.mann_kendall?.tau, 3)}`} tone="violet" />
-            <StatCard icon={Activity} label="Significance" value={summary ? (summary.significant ? 'Significant' : 'Not significant') : '—'} sub={`alpha = ${result.significance?.alpha ?? 0.05}`} tone="amber" />
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <Panel>
+              <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                Change per decade
+              </p>
+              <p className="mt-2 text-2xl font-bold text-white">
+                {signed(trend.slope_per_decade, 2)} {units}
+              </p>
+              <p className="mt-1 text-xs text-slate-400">
+                {signed(trend.slope_per_year, 3)} per year (OLS, R² = {num(trend.r2, 3)})
+              </p>
+            </Panel>
+
+            <Panel>
+              <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                Sen&apos;s slope / year
+              </p>
+              <p className="mt-2 text-2xl font-bold text-white">
+                {signed(sen.per_year, 3)}
+              </p>
+              <p className="mt-1 text-xs text-slate-400">
+                95% CI {signed(sen.ci_low, 3)} to {signed(sen.ci_high, 3)}
+              </p>
+            </Panel>
+
+            <Panel>
+              <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                Mann-Kendall p-value
+              </p>
+              <p className="mt-2 text-2xl font-bold text-white">{pval(mk.p_value)}</p>
+              <p className="mt-1 text-xs text-slate-400">
+                tau = {num(mk.tau, 3)} · trend = {mk.trend}
+              </p>
+            </Panel>
+
+            <Panel>
+              <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                Significance
+              </p>
+              <p
+                className={`mt-2 text-2xl font-bold ${
+                  isSig ? 'text-emerald-400' : 'text-amber-300'
+                }`}
+              >
+                {isSig ? 'Significant' : 'Not significant'}
+              </p>
+              <p className="mt-1 text-xs text-slate-400">
+                alpha = {result.significance?.alpha ?? 0.05} ({mk.trend})
+              </p>
+            </Panel>
           </div>
 
-          <Panel
-            title={`${result.meta?.layer || layer} time series`}
-            subtitle={`${result.meta?.n_obs ?? series.length} observations · ${result.meta?.aggregation || aggregation}${result.meta?.units ? ` · ${result.meta.units}` : ''}`}
-            action={<Link to="/statistics" className="btn-ghost">Full statistics</Link>}
-          >
+          <Panel>
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h3 className="text-base font-semibold text-white">
+                  {result.meta?.layer} time series
+                </h3>
+                <p className="text-xs text-slate-400">
+                  {result.meta?.n_obs} observations · {result.meta?.aggregation} · {units}
+                </p>
+              </div>
+              <Link to="/statistics" className="btn-ghost border border-slate-700 px-3 py-1.5 text-xs">
+                Full statistics
+              </Link>
+            </div>
+
             <PlotChart
-              data={traces}
-              layout={{ yaxis: { title: { text: result.meta?.units || '' } } }}
-              height={380}
+              result={result}
+              data={result}
+              series={result.series}
+              trendLine={result.trend_line}
+              trend_line={result.trend_line}
+              label={result.meta?.layer}
+              name={result.meta?.layer}
+              units={units}
             />
           </Panel>
 
-          {summary && (
-            <Panel title="What this means">
-              <p className="text-sm text-ink">{summary.text}</p>
-              <p className="mt-3 text-xs text-ink-faint">
-                Measured evidence only. This text is generated from the statistics above; it does not explain why the
-                change is happening.
-              </p>
-            </Panel>
-          )}
+          <Panel>
+            <h3 className="text-base font-semibold text-white">What this means</h3>
+            <p className="mt-1 text-xs text-slate-400">
+              Measured evidence only. This text is generated directly from the statistical tests above.
+            </p>
+            <p className="mt-3 text-sm leading-relaxed text-slate-200">
+              {interpret(result)}
+            </p>
+            {result.meta?.notes?.length > 0 && (
+              <ul className="mt-3 list-disc space-y-1 pl-5 text-xs text-slate-400">
+                {result.meta.notes.map((n, idx) => (
+                  <li key={idx}>{n}</li>
+                ))}
+              </ul>
+            )}
+          </Panel>
         </>
       )}
 
-      <Notice kind="warn" title="Land surface temperature is not air temperature">
-        LST is the radiometric temperature of the ground and vegetation surface seen by the satellite. It can be much
-        warmer than air temperature on a sunny afternoon. Satellite values are also missing under cloud, so
-        quality-flagged observations are excluded by the backend.
+      <Notice>
+        <p className="font-semibold text-amber-300">⚠️ {activeVar.caveatTitle}</p>
+        <p className="mt-1 text-xs text-slate-300">{activeVar.caveatText}</p>
       </Notice>
     </div>
   )
